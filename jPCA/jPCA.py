@@ -126,7 +126,7 @@ class JPCA:
             subtract_cc_mean: Whether we subtract CC mean during preprocessing.
             tstart: Starting time to use from the data. Default 0. 
             tend: Ending time to use from the data. -1 sets it to the end of the dataset.
-            times: A list or numpy array containing the time for each time-bin of the data. 
+            times: A list containing the time for each time-bin of the data.
                 This is used to determine which time bins are included and excluded
                 from the data.]
 
@@ -145,7 +145,7 @@ class JPCA:
         assert datas, "datas cannot be empty"
         T = datas[0].shape[1]
         if times is None:
-            times = np.arange(T)
+            times = list(range(T))
             tstart=0
             tend=-1
 
