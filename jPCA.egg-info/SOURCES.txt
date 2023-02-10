@@ -1,3 +1,5 @@
+LICENSE
+README.md
 setup.py
 jPCA/__init__.py
 jPCA/jPCA.py

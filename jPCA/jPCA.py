@@ -1,17 +1,51 @@
+from typing import Optional
+
 import numpy as np
 
 from sklearn.decomposition import PCA
 
-from jPCA.util import ensure_datas_is_list, preprocess
+from jPCA.util import ensure_datas_is_list
 from jPCA.regression import skew_sym_regress
 
 __all__ = ['JPCA']
 
 class JPCA:
-    def __init__(self, num_jpcs=2):
+    def __init__(
+            self,
+            num_pcs: Optional[int] = 6,
+            num_jpcs: int = 2,
+            soft_normalize: float = 5,
+            subtract_cc_mean: bool = True,
+    ):
+        """
+
+        Parameters
+        ----------
+        num_jpcs: number of jPCA components to calculate. Must be even for plotting.
+        num_pcs: number of principal components to use when preprocessing with PCA.
+            Set to `None` to not use PCA.
+        soft_normalize: Constant used during soft-normalization preprocessing step.
+                        Adapted from original jPCA matlab code. Normalized firing rate is
+                        computed by dividing by the range of the unit across all conditions and times
+                        plus the soft_normalize constant: Y_{cij} = (max(Y_{:i:}) - min(Y_{:i:}) + C)
+                        where Y_{cij} is the cth condition, ith neuron, at the jth time bin.
+                        C is the constant provided by soft_normalize. Set C negative to skip the
+                        soft-normalizing step.
+        subtract_cc_mean: Whether to subtract the mean across conditions.
+        """
         assert num_jpcs % 2 == 0, "num_jpcs must be an even number."
+        assert soft_normalize >= 0, "soft_normalize must be non-negative."
+        # Initialize attributes with arguments
         self.num_jpcs = num_jpcs
+        self.pca = PCA(n_components=num_pcs) if (num_pcs is not None) else None
+        self.soft_normalize = soft_normalize
+        self.subtract_cc_mean = subtract_cc_mean
+
+        # Initialize attributes that will be set later
         self.jpcs = None
+        self.cc_mean_ : Optional[float] = None
+        self.firing_rate_range_ : Optional[float] = None
+        self.full_data_var = None
 
     def _calculate_jpcs(self, M):
         num_jpcs = self.num_jpcs
@@ -70,6 +104,82 @@ class JPCA:
             # Update jpc pair
             self.jpcs[:, k:k+2] = self.jpcs[:, k:k+2] @ basis
 
+    def preprocess(
+            self,
+            datas,
+            times,
+            tstart=-50,
+            tend=150,
+            fit_params: bool = False,
+            ):
+        """
+        Preprocess data for jPCA.
+
+        Args
+        ----
+            datas: List of trials, where each element of the list has shape Times x Neurons.
+                As an example, this might be the output of load_churchland_data()
+
+            times: List of times for the experiment. Typically, time zero corresponds
+                to a stimulus onset. This list is used for extracting the set of
+                data to be analyzed (see tstart and tend args).
+
+            tstart: Integer. Starting time for analysis. For example, if times is [-10, 0 , 10]
+                    and tstart=0, then the data returned by this function will start
+                    at index 1.
+
+            tend: Integer. Ending time for analysis.
+
+            fit_params: whether to fit the PCA and mean parameters.
+
+        Returns
+        -------
+            data_list: List of arrays, each T x N. T will depend on the values
+                passed for tstart and tend. N will be equal to num_pcs if pca=True.
+                Otherwise the dimension of the data will remain unchanged.
+            full_data_variance: Float, variance of original dataset.
+            pca_variance_captured: Array, variance captured by each PC.
+                                   If pca=False, this is set to None.
+        """
+        datas = np.stack(datas, axis=0)
+        num_conditions, num_time_bins, num_units = datas.shape
+
+        if self.soft_normalize > 0:
+            if fit_params:
+                self.firing_rate_range_ = np.max(datas, axis=(0,1)) - np.min(datas, axis=(0,1))
+            datas /= (self.firing_rate_range_ + self.soft_normalize)
+
+        if self.subtract_cc_mean:
+            if fit_params:
+                self.cc_mean_ = np.mean(datas, axis=0, keepdims=True)
+            datas -= self.cc_mean_
+
+        # For consistency with the original jPCA matlab code,
+        # we compute PCA using only the analyzed times.
+        idx_start = times.index(tstart)
+        idx_end = times.index(tend) + 1 # Add one so idx is inclusive
+        num_time_bins = idx_end - idx_start
+        datas = datas[:, idx_start:idx_end, :]
+
+        # Reshape to perform PCA on all trials at once.
+        X_full = np.concatenate(datas)
+        full_data_var = np.sum(np.var(X_full, axis=0))
+        pca_variance_captured = None
+
+        if self.pca:
+            if fit_params:
+                self.pca.fit(X_full)
+            datas = self.pca.transform(X_full)
+            datas = datas.reshape(num_conditions, num_time_bins, self.pca.n_components_)
+            pca_variance_captured = np.var(datas, axis=(0, 1), ddof=1)  # Use ddof=1 to match sklearn code
+            if fit_params:
+                np.testing.assert_array_almost_equal(
+                    pca_variance_captured, self.pca.explained_variance_
+                )
+
+        data_list = [x for x in datas]
+        return data_list, full_data_var, pca_variance_captured
+
     @ensure_datas_is_list
     def project(self, datas):
         """
@@ -77,7 +187,6 @@ class JPCA:
         We assume that rotation_matrix is an orthogonal matrix which was found
         by fitting a rotational LDS to data (e.g via setting dynamics="rotational").
         This function then projects on the top eigenvectors of this rotation matrix.
-
 
         Returns
         -------
@@ -88,23 +197,15 @@ class JPCA:
         var_capt = np.var(proj, axis=(0,1))
         return [x for x in proj], var_capt
 
-    # def: np.var(x, axis):
-    #   mean = np.mean(x, axis=axis, keepdims=True)
-    #   x_bar = x - mean
-    #   sq_err = np.sum(x_bar**2, axis=axis)
-    #   return sq_err / x.shape[axis]
-
     @ensure_datas_is_list
-    def fit(self,
+    def fit_transform(
+            self,
             datas,
-            pca=True,
-            num_pcs=6, 
-            subtract_cc_mean=True,
             tstart=0,
             tend=-1,
             times=None,
             align_axes_to_data=True,
-            **preprocess_kwargs):
+            ):
     
         """
         Fit jPCA to a dataset. This function does not do plotting -- 
@@ -121,12 +222,9 @@ class JPCA:
         ----
             datas: A list containing trials. Each element of the list should be T x D,
                 where T is the length of the trial, and D is the number of neurons.
-            pca: Boolean, whether or not we preprocess using PCA. Default True.
-            num_pcs: Number of PCs to use when pca=True. Default 6.
-            subtract_cc_mean: Whether we subtract CC mean during preprocessing.
-            tstart: Starting time to use from the data. Default 0. 
+            tstart: Starting time to use from the data. Default 0.
             tend: Ending time to use from the data. -1 sets it to the end of the dataset.
-            times: A list or numpy array containing the time for each time-bin of the data. 
+            times: A list containing the time for each time-bin of the data.
                 This is used to determine which time bins are included and excluded
                 from the data.]
 
@@ -145,15 +243,18 @@ class JPCA:
         assert datas, "datas cannot be empty"
         T = datas[0].shape[1]
         if times is None:
-            times = np.arange(T)
+            times = list(range(T))
             tstart=0
             tend=-1
 
-        processed_datas, full_data_var, pca_var_capt = \
-            preprocess(datas, times, tstart=tstart, tend=tend, pca=pca,
-                       subtract_cc_mean=subtract_cc_mean, num_pcs=num_pcs,
-                       **preprocess_kwargs)
-        self.full_data_var = full_data_var
+        processed_datas, self.full_data_var, pca_var_capt = \
+            self.preprocess(
+                datas,
+                times,
+                tstart=tstart,
+                tend=tend,
+                fit_params=True,
+            )
 
         # Estimate X dot via a first difference, and find the best
         # skew_symmetric matrix which explains the data.
@@ -171,7 +272,72 @@ class JPCA:
 
         projected, jpca_var_capt = self.project(processed_datas)
 
-        return (projected, 
+        return (projected,
+                self.full_data_var,
+                pca_var_capt,
+                jpca_var_capt)
+
+    @ensure_datas_is_list
+    def transform(
+            self,
+            datas,
+            tstart=0,
+            tend=-1,
+            times=None,
+    ):
+
+        """
+        Transform a dataset using pre-trained jPCA.
+        Different from `.project()` method in that `transform` also preprocesses
+        the data.
+
+        The tstart and tend arguments are used to exclude certain parts of the data
+        during fitting.
+
+        For example, if tstart=-20, tend=10, and times = [-30, -20, -10, 0, 10, 20],
+        each trial would include the 2nd through 5th timebins (the other timebins)
+        would be discarded. By default the entire dataset is used.
+
+        Args
+        ----
+            datas: A list containing trials. Each element of the list should be T x D,
+                where T is the length of the trial, and D is the number of neurons.
+            tstart: Starting time to use from the data. Default 0.
+            tend: Ending time to use from the data. -1 sets it to the end of the dataset.
+            times: A list containing the time for each time-bin of the data.
+                This is used to determine which time bins are included and excluded
+                from the data.]
+
+        Returns
+        -------
+            projected: A list of trials projected onto the jPCS. Each entry is an array
+                    with shape T x num_jpcs.
+            full_data_variance: Float, variance of the full dataset, for calculating
+                                variance captured by projections.
+            pca_captured_variance: Array, size is num_pcs. Contains variance captured
+                                by each PC.
+            jpca_captured_variance: Array, size is num_jpcs. Contains variance captured
+                                    by each jPC.
+        """
+        assert isinstance(datas, list), "datas must be a list."
+        assert datas, "datas cannot be empty"
+        T = datas[0].shape[1]
+        if times is None:
+            times = list(range(T))
+            tstart=0
+            tend=-1
+
+        processed_datas, full_data_var, pca_var_capt = \
+            self.preprocess(
+                datas,
+                times,
+                tstart=tstart,
+                tend=tend,
+            )
+
+        projected, jpca_var_capt = self.project(processed_datas)
+
+        return (projected,
                 full_data_var,
                 pca_var_capt,
                 jpca_var_capt)
