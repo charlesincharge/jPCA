@@ -187,12 +187,6 @@ class JPCA:
         var_capt = np.var(proj, axis=(0,1))
         return [x for x in proj], var_capt
 
-    # def: np.var(x, axis):
-    #   mean = np.mean(x, axis=axis, keepdims=True)
-    #   x_bar = x - mean
-    #   sq_err = np.sum(x_bar**2, axis=axis)
-    #   return sq_err / x.shape[axis]
-
     @ensure_datas_is_list
     def fit(self,
             datas,
