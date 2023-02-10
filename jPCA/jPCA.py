@@ -43,7 +43,6 @@ class JPCA:
 
         # Initialize attributes that will be set later
         self.jpcs = None
-        self.is_fitted : bool = False
         self.cc_mean_ : Optional[float] = None
         self.firing_rate_range_ : Optional[float] = None
 
@@ -262,7 +261,6 @@ class JPCA:
 
         projected, jpca_var_capt = self.project(processed_datas)
 
-        self.is_fitted = True
         return (projected,
                 full_data_var,
                 pca_var_capt,
