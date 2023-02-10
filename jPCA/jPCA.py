@@ -171,7 +171,7 @@ class JPCA:
                 self.pca.fit(X_full)
             datas = self.pca.transform(X_full)
             datas = datas.reshape(num_conditions, num_time_bins, self.pca.n_components_)
-            pca_variance_captured = np.var(datas, axis=(0,1))
+            pca_variance_captured = np.var(datas, axis=(0, 1), ddof=1)  # Use ddof=1 to match sklearn code
             if fit_params:
                 np.testing.assert_array_almost_equal(
                     pca_variance_captured, self.pca.explained_variance_
