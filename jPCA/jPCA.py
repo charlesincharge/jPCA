@@ -45,6 +45,7 @@ class JPCA:
         self.jpcs = None
         self.cc_mean_ : Optional[float] = None
         self.firing_rate_range_ : Optional[float] = None
+        self.full_data_var = None
 
     def _calculate_jpcs(self, M):
         num_jpcs = self.num_jpcs
@@ -109,6 +110,7 @@ class JPCA:
             times,
             tstart=-50,
             tend=150,
+            fit_params: bool = False,
             ):
         """
         Preprocess data for jPCA.
@@ -128,6 +130,8 @@ class JPCA:
 
             tend: Integer. Ending time for analysis.
 
+            fit_params: whether to fit the PCA and mean parameters.
+
         Returns
         -------
             data_list: List of arrays, each T x N. T will depend on the values
@@ -141,11 +145,13 @@ class JPCA:
         num_conditions, num_time_bins, num_units = datas.shape
 
         if self.soft_normalize > 0:
-            self.firing_rate_range_ = np.max(datas, axis=(0,1)) - np.min(datas, axis=(0,1))
+            if fit_params:
+                self.firing_rate_range_ = np.max(datas, axis=(0,1)) - np.min(datas, axis=(0,1))
             datas /= (self.firing_rate_range_ + self.soft_normalize)
 
         if self.subtract_cc_mean:
-            self.cc_mean_ = np.mean(datas, axis=0, keepdims=True)
+            if fit_params:
+                self.cc_mean_ = np.mean(datas, axis=0, keepdims=True)
             datas -= self.cc_mean_
 
         # For consistency with the original jPCA matlab code,
@@ -161,9 +167,15 @@ class JPCA:
         pca_variance_captured = None
 
         if self.pca:
-            datas = self.pca.fit_transform(X_full)
-            datas = datas.reshape(num_conditions, num_time_bins, self.pca.n_components_
-            pca_variance_captured = self.pca.explained_variance_
+            if fit_params:
+                self.pca.fit(X_full)
+            datas = self.pca.transform(X_full)
+            datas = datas.reshape(num_conditions, num_time_bins, self.pca.n_components_)
+            pca_variance_captured = np.var(datas, axis=(0,1))
+            if fit_params:
+                np.testing.assert_array_almost_equal(
+                    pca_variance_captured, self.pca.explained_variance_
+                )
 
         data_list = [x for x in datas]
         return data_list, full_data_var, pca_variance_captured
@@ -176,7 +188,6 @@ class JPCA:
         by fitting a rotational LDS to data (e.g via setting dynamics="rotational").
         This function then projects on the top eigenvectors of this rotation matrix.
 
-
         Returns
         -------
         out: T x num_components project of the data, which should capture rotations
@@ -187,13 +198,14 @@ class JPCA:
         return [x for x in proj], var_capt
 
     @ensure_datas_is_list
-    def fit(self,
+    def fit_transform(
+            self,
             datas,
             tstart=0,
             tend=-1,
             times=None,
             align_axes_to_data=True,
-            **preprocess_kwargs):
+            ):
     
         """
         Fit jPCA to a dataset. This function does not do plotting -- 
@@ -235,15 +247,14 @@ class JPCA:
             tstart=0
             tend=-1
 
-        processed_datas, full_data_var, pca_var_capt = \
+        processed_datas, self.full_data_var, pca_var_capt = \
             self.preprocess(
                 datas,
                 times,
                 tstart=tstart,
                 tend=tend,
-                **preprocess_kwargs
+                fit_params=True,
             )
-        self.full_data_var = full_data_var
 
         # Estimate X dot via a first difference, and find the best
         # skew_symmetric matrix which explains the data.
@@ -258,6 +269,71 @@ class JPCA:
         # Optionally align axes so data is spread along horizontal axes in plots
         if align_axes_to_data:
             self.align_jpcs(processed_datas)
+
+        projected, jpca_var_capt = self.project(processed_datas)
+
+        return (projected,
+                self.full_data_var,
+                pca_var_capt,
+                jpca_var_capt)
+
+    @ensure_datas_is_list
+    def transform(
+            self,
+            datas,
+            tstart=0,
+            tend=-1,
+            times=None,
+    ):
+
+        """
+        Transform a dataset using pre-trained jPCA.
+        Different from `.project()` method in that `transform` also preprocesses
+        the data.
+
+        The tstart and tend arguments are used to exclude certain parts of the data
+        during fitting.
+
+        For example, if tstart=-20, tend=10, and times = [-30, -20, -10, 0, 10, 20],
+        each trial would include the 2nd through 5th timebins (the other timebins)
+        would be discarded. By default the entire dataset is used.
+
+        Args
+        ----
+            datas: A list containing trials. Each element of the list should be T x D,
+                where T is the length of the trial, and D is the number of neurons.
+            tstart: Starting time to use from the data. Default 0.
+            tend: Ending time to use from the data. -1 sets it to the end of the dataset.
+            times: A list containing the time for each time-bin of the data.
+                This is used to determine which time bins are included and excluded
+                from the data.]
+
+        Returns
+        -------
+            projected: A list of trials projected onto the jPCS. Each entry is an array
+                    with shape T x num_jpcs.
+            full_data_variance: Float, variance of the full dataset, for calculating
+                                variance captured by projections.
+            pca_captured_variance: Array, size is num_pcs. Contains variance captured
+                                by each PC.
+            jpca_captured_variance: Array, size is num_jpcs. Contains variance captured
+                                    by each jPC.
+        """
+        assert isinstance(datas, list), "datas must be a list."
+        assert datas, "datas cannot be empty"
+        T = datas[0].shape[1]
+        if times is None:
+            times = list(range(T))
+            tstart=0
+            tend=-1
+
+        processed_datas, full_data_var, pca_var_capt = \
+            self.preprocess(
+                datas,
+                times,
+                tstart=tstart,
+                tend=tend,
+            )
 
         projected, jpca_var_capt = self.project(processed_datas)
 
