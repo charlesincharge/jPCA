@@ -1,17 +1,51 @@
+from typing import Optional
+
 import numpy as np
 
 from sklearn.decomposition import PCA
 
-from jPCA.util import ensure_datas_is_list, preprocess
+from jPCA.util import ensure_datas_is_list
 from jPCA.regression import skew_sym_regress
 
 __all__ = ['JPCA']
 
 class JPCA:
-    def __init__(self, num_jpcs=2):
+    def __init__(
+            self,
+            num_pcs: Optional[int] = 6,
+            num_jpcs: int = 2,
+            soft_normalize: float = 5,
+            subtract_cc_mean: bool = True,
+    ):
+        """
+
+        Parameters
+        ----------
+        num_jpcs: number of jPCA components to calculate. Must be even for plotting.
+        num_pcs: number of principal components to use when preprocessing with PCA.
+            Set to `None` to not use PCA.
+        soft_normalize: Constant used during soft-normalization preprocessing step.
+                        Adapted from original jPCA matlab code. Normalized firing rate is
+                        computed by dividing by the range of the unit across all conditions and times
+                        plus the soft_normalize constant: Y_{cij} = (max(Y_{:i:}) - min(Y_{:i:}) + C)
+                        where Y_{cij} is the cth condition, ith neuron, at the jth time bin.
+                        C is the constant provided by soft_normalize. Set C negative to skip the
+                        soft-normalizing step.
+        subtract_cc_mean: Whether to subtract the mean across conditions.
+        """
         assert num_jpcs % 2 == 0, "num_jpcs must be an even number."
+        assert soft_normalize >= 0, "soft_normalize must be non-negative."
+        # Initialize attributes with arguments
         self.num_jpcs = num_jpcs
+        self.pca = PCA(n_components=num_pcs) if (num_pcs is not None) else None
+        self.soft_normalize = soft_normalize
+        self.subtract_cc_mean = subtract_cc_mean
+
+        # Initialize attributes that will be set later
         self.jpcs = None
+        self.is_fitted : bool = False
+        self.cc_mean_ : Optional[float] = None
+        self.firing_rate_range_ : Optional[float] = None
 
     def _calculate_jpcs(self, M):
         num_jpcs = self.num_jpcs
@@ -70,14 +104,13 @@ class JPCA:
             # Update jpc pair
             self.jpcs[:, k:k+2] = self.jpcs[:, k:k+2] @ basis
 
-    def preprocess(datas,
-                   times,
-                   tstart=-50,
-                   tend=150,
-                   soft_normalize=5,
-                   subtract_cc_mean=True,
-                   pca=True,
-                   num_pcs=6):
+    def preprocess(
+            self,
+            datas,
+            times,
+            tstart=-50,
+            tend=150,
+            ):
         """
         Preprocess data for jPCA.
 
@@ -96,20 +129,6 @@ class JPCA:
 
             tend: Integer. Ending time for analysis.
 
-            soft_normalize: Float or Int. Constant used during soft-normalization preprocessing step.
-                            Adapted from original jPCA matlab code. Normalized firing rate is
-                            computed by dividing by the range of the unit across all conditions and times
-                            plus the soft_normalize constant: Y_{cij} = (max(Y_{:i:}) - min(Y_{:i:}) + C)
-                            where Y_{cij} is the cth condition, ith neuron, at the jth time bin.
-                            C is the constant provided by soft_normalize. Set C negative to skip the
-                            soft-normalizing step.
-
-            subtract_cc_mean: Boolean. Whether or not to subtract the mean across conditions. Default True.
-
-            pca: Boolean. True to perform PCA as a preprocessing step. Defaults to True.
-
-            num_pcs: Int. When pca=True, controls the number of PCs to use. Defaults to 6.
-
         Returns
         -------
             data_list: List of arrays, each T x N. T will depend on the values
@@ -122,13 +141,13 @@ class JPCA:
         datas = np.stack(datas, axis=0)
         num_conditions, num_time_bins, num_units = datas.shape
 
-        if soft_normalize > 0:
-            fr_range = np.max(datas, axis=(0,1)) - np.min(datas, axis=(0,1))
-            datas /= (fr_range + soft_normalize)
+        if self.soft_normalize > 0:
+            self.firing_rate_range_ = np.max(datas, axis=(0,1)) - np.min(datas, axis=(0,1))
+            datas /= (self.firing_rate_range_ + self.soft_normalize)
 
-        if subtract_cc_mean:
-            cc_mean = np.mean(datas, axis=0, keepdims=True)
-            datas -= cc_mean
+        if self.subtract_cc_mean:
+            self.cc_mean_ = np.mean(datas, axis=0, keepdims=True)
+            datas -= self.cc_mean_
 
         # For consistency with the original jPCA matlab code,
         # we compute PCA using only the analyzed times.
@@ -142,11 +161,10 @@ class JPCA:
         full_data_var = np.sum(np.var(X_full, axis=0))
         pca_variance_captured = None
 
-        if pca:
-            pca = PCA(num_pcs)
-            datas = pca.fit_transform(X_full)
-            datas = datas.reshape(num_conditions, num_time_bins, num_pcs)
-            pca_variance_captured = pca.explained_variance_
+        if self.pca:
+            datas = self.pca.fit_transform(X_full)
+            datas = datas.reshape(num_conditions, num_time_bins, self.pca.n_components_
+            pca_variance_captured = self.pca.explained_variance_
 
         data_list = [x for x in datas]
         return data_list, full_data_var, pca_variance_captured
@@ -178,9 +196,6 @@ class JPCA:
     @ensure_datas_is_list
     def fit(self,
             datas,
-            pca=True,
-            num_pcs=6, 
-            subtract_cc_mean=True,
             tstart=0,
             tend=-1,
             times=None,
@@ -202,10 +217,7 @@ class JPCA:
         ----
             datas: A list containing trials. Each element of the list should be T x D,
                 where T is the length of the trial, and D is the number of neurons.
-            pca: Boolean, whether or not we preprocess using PCA. Default True.
-            num_pcs: Number of PCs to use when pca=True. Default 6.
-            subtract_cc_mean: Whether we subtract CC mean during preprocessing.
-            tstart: Starting time to use from the data. Default 0. 
+            tstart: Starting time to use from the data. Default 0.
             tend: Ending time to use from the data. -1 sets it to the end of the dataset.
             times: A list containing the time for each time-bin of the data.
                 This is used to determine which time bins are included and excluded
@@ -236,9 +248,6 @@ class JPCA:
                 times,
                 tstart=tstart,
                 tend=tend,
-                pca=pca,
-                subtract_cc_mean=subtract_cc_mean,
-                num_pcs=num_pcs,
                 **preprocess_kwargs
             )
         self.full_data_var = full_data_var
@@ -259,7 +268,8 @@ class JPCA:
 
         projected, jpca_var_capt = self.project(processed_datas)
 
-        return (projected, 
+        self.is_fitted = True
+        return (projected,
                 full_data_var,
                 pca_var_capt,
                 jpca_var_capt)
